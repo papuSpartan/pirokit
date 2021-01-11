@@ -1,68 +1,60 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-mkdir -p $HOME/.cache/pirokit
+#ensures there are no accidental downloads
+set -eo pipefail
 
-if [ -z $1 ]; then
-  query=$(echo "" | dmenu -p "Search Torrent: ")
-else
-  query=$1
-fi
+baseurl="https://www.1377x.to/"
+cachedir="$HOME/.cache/dl"
 
-baseurl="https://1337x.to"
-cachedir="$HOME/.cache/pirokit"
-query="$(sed 's/ /+/g' <<<$query)"
+#get query from dmenu(later rofi)
+query=$(echo "" | rofi -dmenu -p "Search Torrent" | sed 's/ /+/g')
 
-#curl -s https://1337x.to/category-search/$query/Movies/1/ > $cachedir/tmp.html
-curl -s https://1337x.to/search/$query/1/ > $cachedir/tmp.html
+#setup working dir
+mkdir -p $cachedir
+cd $cachedir
 
-# Get Titles
-grep -o '<a href="/torrent/.*</a>' $cachedir/tmp.html |
-  sed 's/<[^>]*>//g' > $cachedir/titles.bw
-
-result_count=$(wc -l $cachedir/titles.bw | awk '{print $1}')
-if [ "$result_count" -lt 1 ]; then
-  notify-send "😔 No Result found. Try again 🔴"
-  exit 0
-fi
+curl -s $baseurl/search/$query/1/ -o tmp.html
 
 
-# Seeders and Leechers
-grep -o '<td class="coll-2 seeds.*</td>\|<td class="coll-3 leeches.*</td>' $cachedir/tmp.html |
-  sed 's/<[^>]*>//g' | sed 'N;s/\n/ /' > $cachedir/seedleech.bw
+#get titles
+grep -o '<a href=./torrent/.*</a>' tmp.html |
+	sed 's/<[^>]*>//g' > titles.bw #deletes tags
+#get seeders
+grep -P '<td class="coll-2 seeds">\d*</td>' tmp.html |
+	sed 's/<[^>]*>//g' > seeders.bw
+#get leechers
+grep -P '<td class="coll-3 leeches">\d*</td>' tmp.html |
+	sed 's/<[^>]*>//g' > leechers.bw
+#get sizes
+grep -P '<td class="coll-4 size mob-uploader">.*</td>' tmp.html |
+	sed 's/<[^>]*>//g' > sizes.bw
+#get links 
+grep -E '/torrent/' tmp.html |
+	sed -E 's#.*(/torrent/.*)/">.*/#\1#' |
+	sed 's/td>//g' > links.bw
 
-# Size
-grep -o '<td class="coll-4 size.*</td>' $cachedir/tmp.html |
-  sed 's/<span class="seeds">.*<\/span>//g' |
-  sed -e 's/<[^>]*>//g' > $cachedir/size.bw
+#generates line numbers
+awk '{print NR " - "$0""}' titles.bw > titlesNumbered.bw
 
-# Links
-grep -E '/torrent/' $cachedir/tmp.html |
-  sed -E 's#.*(/torrent/.*)/">.*/#\1#' |
-  sed 's/td>//g' > $cachedir/links.bw
+#gets line number (that groupthe user selected in dmenu)
+LINE=$(paste -d\| titlesNumbered.bw seeders.bw leechers.bw sizes.bw |
+   	rofi -dmenu -i -l 25 |
+   	cut -d- -f1
+)
 
+suburl=$(sed "${LINE}q;d" links.bw)
+url="$baseurl$suburl/"
 
+#get page that contains magnet link
+curl -s $url > tmp.html
 
-# Clearning up some data to display
-sed 's/\./ /g; s/\-/ /g' $cachedir/titles.bw |
-  sed 's/[^A-Za-z0-9 ]//g' | tr -s " " > $cachedir/tmp && mv $cachedir/tmp $cachedir/titles.bw
+#scrape magnet link
+magnet=$(paste tmp.html |
+	tr -d '\n' |
+	sed -E 's#.*(magnet:\?xt=urn:btih:[^"]*).*#\1#'
+)
 
-awk '{print NR " - ["$0"]"}' $cachedir/size.bw > $cachedir/tmp && mv $cachedir/tmp $cachedir/size.bw
-awk '{print "[S:"$1 ", L:"$2"]" }' $cachedir/seedleech.bw > $cachedir/tmp && mv $cachedir/tmp $cachedir/seedleech.bw
+deluge-console add $magnet
 
-# Getting the line number
-LINE=$(paste -d\   $cachedir/size.bw $cachedir/seedleech.bw $cachedir/titles.bw |
-  dmenu -i -l 25 |
-  cut -d\- -f1 |
-  awk '{$1=$1; print}')
-
-url=$(head -n $LINE $cachedir/links.bw | tail -n +$LINE)
-fullURL="${baseurl}${url}/"
-
-# Requesting page for magnet link
-curl -s $fullURL > $cachedir/tmp.html
-magnet=$(grep -Po "magnet:\?xt=urn:btih:[a-zA-Z0-9]*" $cachedir/tmp.html | head -n 1) 
-
-deluge-console add "$magnet"
-
-# Simple notification
-notify-send "⬇️  Start downloading File 📁"
+#notify the user that the download has started
+notify-send "⬇️ download started ⬇️"
